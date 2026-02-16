@@ -1,0 +1,113 @@
+name: Build WebView APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Website URL (contoh: http://1.2.3.4:2187)"
+        required: true
+      app_name:
+        description: "Nama App"
+        required: true
+      icon_base64:
+        description: "PNG base64 (tanpa data:image/... boleh juga)"
+        required: false
+      job_id:
+        description: "Job ID (buat nama artifact)"
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.7"
+
+      - name: Patch URL in MainActivity
+        run: |
+          set -e
+          FILE="app/src/main/java/com/lixx/webapp/MainActivity.java"
+          if [ ! -f "$FILE" ]; then
+            echo "❌ MainActivity.java not found at: $FILE"
+            exit 1
+          fi
+          URL="${{ github.event.inputs.url }}"
+          # escape sed
+          ESC_URL=$(printf '%s\n' "$URL" | sed -e 's/[\/&]/\\&/g')
+          sed -i "s/{{URL_PLACEHOLDER}}/${ESC_URL}/g" "$FILE"
+          echo "✅ URL patched to: $URL"
+
+      - name: Patch App Name
+        run: |
+          set -e
+          STR="app/src/main/res/values/strings.xml"
+          APP="${{ github.event.inputs.app_name }}"
+          ESC_APP=$(printf '%s\n' "$APP" | sed -e 's/[\/&]/\\&/g')
+          sed -i "s/<string name=\"app_name\">.*<\/string>/<string name=\"app_name\">${ESC_APP}<\/string>/g" "$STR"
+          echo "✅ app_name set to: $APP"
+
+      - name: Apply Icon (base64 -> mipmap)
+        run: |
+          set -e
+          mkdir -p app/src/main/res/mipmap-hdpi \
+                   app/src/main/res/mipmap-mdpi \
+                   app/src/main/res/mipmap-xhdpi \
+                   app/src/main/res/mipmap-xxhdpi \
+                   app/src/main/res/mipmap-xxxhdpi
+
+          ICON_INPUT="${{ github.event.inputs.icon_base64 }}"
+
+          # kalau user kirim data:image/png;base64,.... buang prefix
+          ICON_CLEAN="$(echo "$ICON_INPUT" | sed 's/^data:image\/png;base64,//')"
+
+          # kalau kosong, pakai default 1x1 PNG (biar build aman)
+          if [ -z "$ICON_CLEAN" ]; then
+            ICON_CLEAN="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO8mZ3wAAAAASUVORK5CYII="
+          fi
+
+          echo "$ICON_CLEAN" | base64 -d > /tmp/ic_launcher.png
+
+          # copy ke semua mipmap (same size)
+          for d in hdpi mdpi xhdpi xxhdpi xxxhdpi; do
+            cp /tmp/ic_launcher.png "app/src/main/res/mipmap-$d/ic_launcher.png"
+          done
+
+          echo "✅ Icon written to mipmap-*"
+
+      - name: Build APK (Debug signed)
+        run: |
+          set -e
+          gradle :app:assembleDebug --no-daemon
+
+      - name: Collect APK
+        run: |
+          set -e
+          mkdir -p out
+          APK_PATH="$(find app/build/outputs/apk/debug -type f -name '*.apk' | head -n 1)"
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ APK not found"
+            exit 1
+          fi
+          cp "$APK_PATH" "out/web-apk-${{ github.event.inputs.job_id }}.apk"
+          echo "✅ APK copied: out/web-apk-${{ github.event.inputs.job_id }}.apk"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-apk-${{ github.event.inputs.job_id }}
+          path: out/web-apk-${{ github.event.inputs.job_id }}.apk
